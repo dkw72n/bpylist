@@ -15,7 +15,7 @@
 
     #define SwapBigToHost16(x) (((x & 0x00FF) << 8) | ((x & 0xFF00) >> 8))
     
-#ifdef __GNU__
+#ifdef __GNUC__
     #define SwapBigToHost32(x) __builtin_bswap32(x)
     #define SwapBigToHost64(x) __builtin_bswap64(x)
 #else
