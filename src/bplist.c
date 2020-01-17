@@ -2,15 +2,26 @@
 #include <pytime.h>
 #include <stdint.h>
 
+#ifdef __GNU__
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define likely(x) (!!(x))
+#define unlikely(x) (!!(x))
+#endif
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 
-    #define SwapBigToHost16(x) ((x & 0x00FF) << 8) | ((x & 0xFF00) >> 8)
+
+    #define SwapBigToHost16(x) (((x & 0x00FF) << 8) | ((x & 0xFF00) >> 8))
+    
+#ifdef __GNU__
     #define SwapBigToHost32(x) __builtin_bswap32(x)
     #define SwapBigToHost64(x) __builtin_bswap64(x)
-
+#else
+    #define SwapBigToHost32(x) _byteswap_ulong(x)
+    #define SwapBigToHost64(x) _byteswap_uint64(x)
+#endif
     #define SwapHostToBig16(x) SwapBigToHost16(x)
     #define SwapHostToBig32(x) SwapBigToHost32(x)
     #define SwapHostToBig64(x) SwapBigToHost64(x)
@@ -172,7 +183,14 @@ parse_uid(const uint8_t type, const uint8_t* const object)
 
     return py_uid;
 }
-
+#if _MSC_VER
+static inline int __builtin_clzll(unsigned long long x) {
+    //unsigned long ret;
+    //_BitScanReverse64(&ret, x);
+    //return (int)(63 ^ ret);
+    return (int)__lzcnt64(x);
+}
+#endif
 static void
 pack_int(bplist_generate_state* const state, const int64_t int_val)
 {
@@ -858,6 +876,11 @@ generate_dict(bplist_generate_state* const state, PyObject* const py_obj)
         if (unlikely(key_result != 0))
             return key_result;
 
+        
+    }
+    
+    pos = 0;
+    while (PyDict_Next(py_obj, &pos, &key, &val)) {
         pack_uint(ref_size,
                   state->objects + val_ref_offset,
                   state->trailer.num_objects);
@@ -869,7 +892,6 @@ generate_dict(bplist_generate_state* const state, PyObject* const py_obj)
         if (unlikely(val_result != 0))
             return val_result;
     }
-
     return 0;
 }
 
@@ -1196,7 +1218,7 @@ generate_plist(PyObject* const self, PyObject* const py_obj)
         .offsets = malloc(initial_offset_table_length),
         .trailer = {
             .offset_size = 4,
-            .ref_size = 2,
+            .ref_size = 1,
             .num_objects = 0,
             .top_object = 0,
             .offset_table_offset = 0
