@@ -78,6 +78,9 @@ typedef struct _bplist_parse_state {
      * defined by offset_size
      */
     const uint8_t* offset_table;
+    /* flags that indicate a object is being parsed */
+    uint8_t* parsing_state;
+
 } bplist_parse_state;
 
 typedef struct _bplist_generate_state {
@@ -910,14 +913,13 @@ parse_plist_object(const bplist_parse_state* const state,
 
     const uint8_t* const object_ref =
         state->offset_table + (object_index * state->offset_size);
-
     if (unlikely(object_ref <= state->data || object_ref >= state->data_end)) {
         PyErr_Format(PyExc_RuntimeError,
                      "bplist parsing hit an invalid object index: %zd",
                      object_index);
         return NULL;
     }
-
+    
     const uint8_t* object =
         state->data + unpack_uint(state->offset_size, object_ref);
 
@@ -928,31 +930,44 @@ parse_plist_object(const bplist_parse_state* const state,
                      object_index);
         return NULL;
     }
-
+    if (unlikely(state->parsing_state[object_index] != 0)){
+        PyErr_Format(PyExc_RuntimeError,
+                     "bplist parsing hit an reference cycle at index: %zd",
+                     object_index);
+        return NULL;
+    }
+    state->parsing_state[object_index] = 1;
     const uint8_t object_type = *object++;
-
+    PyObject* ret = NULL;
     switch (object_type & 0xF0)
     {
     case plist_type_int:
-        return parse_int(object_type, object);
+        ret = parse_int(object_type, object);
+        break;
 
     case plist_type_uid:
-        return parse_uid(object_type, object);
+        ret = parse_uid(object_type, object);
+        break;
 
     case plist_type_ascii_string:
-        return parse_ascii_string(object_type, object, state->data_end);
+        ret = parse_ascii_string(object_type, object, state->data_end);
+        break;
 
     case plist_type_utf16_string:
-        return parse_utf16_string(object_type, object, state->data_end);
+        ret = parse_utf16_string(object_type, object, state->data_end);
+        break;
 
     case plist_type_data:
-        return parse_data(object_type, object, state->data_end);
+        ret = parse_data(object_type, object, state->data_end);
+        break;
 
     case plist_type_dict:
-        return parse_dict(state, object_type, object, state->data_end);
+        ret = parse_dict(state, object_type, object, state->data_end);
+        break;
 
     case plist_type_array:
-        return parse_array(state, object_type, object, state->data_end);
+        ret = parse_array(state, object_type, object, state->data_end);
+        break;
 
     case plist_type_primitive:
         /* NULL is defined in the spec, but I cannot get
@@ -961,17 +976,18 @@ parse_plist_object(const bplist_parse_state* const state,
          * the pure python code also doesn't want to serialize None;
          * same story with UUIDs and URLs
          */
-        if (object_type == plist_type_false) Py_RETURN_FALSE;
-        if (object_type == plist_type_true)  Py_RETURN_TRUE;
+        if (object_type == plist_type_false) Py_INCREF(ret=Py_False);
+        if (object_type == plist_type_true)  Py_INCREF(ret=Py_True);
         break;
 
     case plist_type_float:
-        if (object_type == 0x23) return parse_float64(object);
-        if (object_type == 0x22) return parse_float32(object);
+        if (object_type == 0x23) ret = parse_float64(object);
+        if (object_type == 0x22) ret = parse_float32(object);
         break;
 
     case plist_type_date:
-        return parse_date(object);
+        ret = parse_date(object);
+        break;
 
     /* Support for parsing sets should be here, except I didn't
      * bother to implement them because I cannot get Cocoa to
@@ -980,13 +996,14 @@ parse_plist_object(const bplist_parse_state* const state,
      */
 
     default:
+        PyErr_Format(PyExc_RuntimeError,
+                    "bplist parsing hit an unknown type: 0x%x",
+                     object_type);
         break;
     }
-
-    PyErr_Format(PyExc_RuntimeError,
-                 "bplist parsing hit an unknown type: 0x%x",
-                 object_type);
-    return NULL;
+      
+    state->parsing_state[object_index] = 0;
+    return ret;
 }
 
 static int
@@ -1042,9 +1059,10 @@ parse_plist(PyObject* const self, PyObject* const plist_data)
         .ref_size = (size_t)trailer->ref_size,
         .offset_size = (size_t)trailer->offset_size,
         .object_count = SwapBigToHost64(trailer->num_objects),
-        .offset_table = data + SwapBigToHost64(trailer->offset_table_offset)
+        .offset_table = data + SwapBigToHost64(trailer->offset_table_offset),
+        .parsing_state = (uint8_t*)malloc(SwapBigToHost64(trailer->num_objects))
     };
-
+    memset(state.parsing_state, 0, state.object_count);
     if (unlikely(check_int_width(state.offset_size, "offset_size") == -1 ||
                  check_int_width(state.ref_size, "ref_size") == -1))
     {
